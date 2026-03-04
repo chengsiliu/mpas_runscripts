@@ -421,6 +421,9 @@ function run_mpas {
 
         initfile="${dadir}/jedi_solver/ana/mem0${memstr}.nc"
         ln -sf "${initfile}" "${domname}_${memstr}.${damode}.${currtime_fil}.nc"
+        if [[ "${damode}" != "mpasout" ]]; then
+            ln -sf "${initfile}" "${domname}_${memstr}.mpasout.${currtime_fil}.nc"
+        fi
         ln -sf "${casedir}/init/${domname}.invariant.nc" .
         ln -sf "${casedir}/${domname}/${domname}.ugwp_oro_data.nc" .
 
