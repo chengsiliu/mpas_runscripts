@@ -49,7 +49,7 @@ if [[ $istatus -eq 0 ]]; then
     case "${task}" in
     post )
         # rename ombg to oman for posterior observer jdiag files
-        for jdiag in ./jdiag*; do
+        for jdiag in ./jdiag_*.nc; do
             jdiag_tmp="${jdiag%.nc}_tmp.nc"
             nccopy -k 3 "${jdiag}" "${jdiag_tmp}"
             ncrename -g ombg,oman "${jdiag_tmp}"
@@ -57,15 +57,10 @@ if [[ $istatus -eq 0 ]]; then
         done
         ;;
     solver )
-        # ncks increments to cold_start IC
-        # Take background file, look for every variable except those listed in ${var_list},
-        # and append them into the analysis file.
-        # -A	Append	Instead of overwriting the output file, this tells NCO to add the variables to the existing file.
-        # -C	No Clobber (Don't Copy)	This tells ncks to not copy the associated coordinate variables (like latitude, longitude, time)
-        #       if they already exist in the destination file. This prevents errors when appending variables to a file
-        #       that already has the same grid dimensions.
-        # -x	Exclude	This inverts the selection. Instead of saying "select these variables," it says "select everything except these variables."
-        # -v	Variable	Specifies the variables to operate on.
+        # ncks increments to cold_start IC (only needed for cycle 0).
+        # For cycle > 0 the mpasout approach is used: background files are
+        # pre-copied to ana/ before the solver run, so all variables are
+        # already present and ncks is not needed.
         #
         if [[ CYCLENO -eq 0 ]]; then
             echo "Running ncks for cycle = CYCLENO to combine increments to the original background file ..."
@@ -77,20 +72,17 @@ if [[ $istatus -eq 0 ]]; then
             done
 
             icount=0; ierr=0
-            # Wait for all and check status
             for pid in "${pids[@]}"; do
                 wait "$pid";
                 if [ $? -eq 0 ]; then
-                    #echo "PID $pid exited successfully"
                     ((icount+=1))
                 else
-                    #echo "PID $pid failed"
                     ((ierr+=1))
                 fi
             done
 
             if [ "$icount" -eq ENS_SIZE ]; then
-                sleep 10   # file system may be slower than the job status in memory
+                sleep 10
                 istatus=0
             else
                 istatus=1

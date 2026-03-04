@@ -55,10 +55,11 @@ function setup_machine {
 
         #JEDI_DIR="/scratch3/NAGAPE/wof/ywang/CADRE2/CADRE_JEDI_MODEL"
         #jedi_modulename="ursa.intel"            # CADRE
+        #JEDI_DIR="/scratch3/NAGAPE/wof/cliu/RDASApp"
         JEDI_DIR="/scratch3/NAGAPE/wof/ywang/GSL_JEDI/rrfs-workflow/sorc/RDASApp"
         jedi_modulename="RDAS/ursa.intel"      # RRFS
 
-        workdirDF="/scratch3/NAGAPE/wof/ywang/MPAS-WoFS/run_dirs"
+        workdirDF="/scratch3/NAGAPE/wof/cliu/MPAS-WoFS/run_dirs"
         post_dir="/scratch3/NAGAPE/wof/ywang/MPAS-WoFS/frdd-wofs-post"
 
         if [[ ${set_up} == true ]]; then
@@ -84,7 +85,7 @@ function setup_machine {
             job_runexe_str="srun"
             runcmd_str=""
 
-            WPSGEOG_PATH="/scratch3/NAGAPE/wof/ywang/MPAS-WoFS/WPS_GEOG/"
+            WPSGEOG_PATH="/scratch3/NAGAPE/wof/cliu/MPAS-WoFS/WPS_GEOG/"
             wgrib2path="/apps/wgrib2/3.1.3/gnu_11.4.1/wmo/bin/wgrib2"
             nckspath="/apps/spack-2024-12/linux-rocky9-x86_64/gcc-11.4.1/nco-5.2.4-h2xd52tl4efe2ga4ayd6rjr3t5elfe6v/bin/ncks"
             gpmetis="/scratch3/NAGAPE/wof/ywang/tools/bin/gpmetis"
@@ -331,7 +332,7 @@ function default_site_settings {
         ;;
 
     "Ursa" )
-        mpas_wofs_python="/scratch3/NAGAPE/wof/ywang/MPAS-WoFS/wofs_new_noise"
+        mpas_wofs_python="/scratch3/NAGAPE/wof/cliu/MPAS-WoFS/wofs_new_noise"
 
         # ICs
         npeics=96; ncores_ics=2
@@ -345,23 +346,23 @@ function default_site_settings {
         claim_cpu_lbc="--cpus-per-task=2"
 
         # DA cycles
-        ncores_dafcst=96;  ncores_filter=96
+        ncores_dafcst=160;  ncores_filter=96
         partition_dafcst="u1-compute"; claim_cpu_dafcst="--cpus-per-task=1"
         partition_filter="u1-compute"; claim_cpu_filter="--cpus-per-task=1"
-                                       claim_cpu_ioda="--cpus-per-task=1"
+                                       claim_cpu_ioda="--cpus-per-task=1 --mem-per-cpu=8G"
                                        claim_cpu_ioda_refl="--cpus-per-task=2"
         npedafcst=96         #; nnodes_fcst=$(( npefcst/ncores_fcst ))
-        npefilter=96         #; nnodes_filter=$(( npefilter/ncores_filter ))
+        npefilter=160        #; nnodes_filter=$(( npefilter/ncores_filter ))
         nnodes_filter=$(( npefilter/ncores_filter ))
         nnodes_dafcst=$(( npedafcst/ncores_dafcst ))
 
         # FCST cycles
-        ncores_fcst=96;  ncores_post=80
+        ncores_fcst=96;  ncores_post=96
         partition_fcst="u1-compute";   claim_cpu_fcst="--cpus-per-task=2"
-        partition_post="u1-compute";   claim_cpu_post="--ntasks-per-node=${ncores_post}"
+        partition_post="u1-compute";   claim_cpu_post="--cpus-per-task=12"
 
         npefcst=96     ; nnodes_fcst=$(( npefcst/ncores_fcst ))
-        npepost=160    ; nnodes_post=$(( npepost/ncores_post ))
+        npepost=96     ; nnodes_post=$(( npepost/ncores_post ))
         ;;
 
     "Hercules" )

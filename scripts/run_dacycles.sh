@@ -1017,15 +1017,14 @@ function jedi_preparation {
 
     if [[ "${taskname}" == "solver" && ${icycle} -gt 0 ]]; then
         #
-        # Copy background file to analysis directory for overwritting with analysis
+        # Copy background file to analysis directory for overwriting with analysis
+        # (mpasout approach: solver writes increments directly into these copies)
         #
         mecho0 "Copying ensemble members from ens to ana ..."
         local -a mem_filelist
         for mem in $(seq -w 001 "${ENS_SIZE}"); do
-            #( cp --dereference "ens/mem${mem}.nc" "ana/mem${mem}.nc" ) &
             mem_filelist+=("ens/mem${mem}.nc")
         done
-        #wait
         parallel_copy_verify "ana" "${mem_filelist[@]}"
     fi
 
@@ -1492,6 +1491,356 @@ function run_jedi_post {
 
 ########################################################################
 
+function run_rediag_fcst {
+    # Run 1-timestep MPAS forecast from analysis to recompute refl10cm
+    # via the full nonlinear microphysics operator.
+    # $1        $2      $3
+    # wrkdir    icycle    iseconds
+    local datimedir=$1
+    local icycle=$2
+    local iseconds=$3
+
+    local wrkdir="$datimedir/rediag_mpas"
+
+    if [[ -f $wrkdir/done.rediag || -f $wrkdir/running.rediag || -f $wrkdir/queue.rediag ]]; then
+        return
+    fi
+
+    mkwrkdir $wrkdir 0
+    cd $wrkdir || return
+
+    if ${relative_path}; then
+        datimedir=$(realpath -m --relative-to=. ${datimedir})
+    fi
+
+    # Wait for solver to finish
+    local -a conditions
+    conditions=("${datimedir}/jedi_solver/done.solver")
+
+    if [[ $dorun == true ]]; then
+        for cond in "${conditions[@]}"; do
+            mecho0 "Checking $cond...."
+            while [[ ! -e $cond ]]; do
+                [[ $verb -eq 1 ]] && mecho0 "Waiting for file: $cond"
+                sleep 10
+            done
+        done
+    fi
+
+    local currtime_fil=${currtime_str//:/.}
+    local dt_sec=${time_step}
+    local dt_hhmmss=$(printf "00:00:%02d" ${dt_sec})
+    local run_dur_hhmmss=$(printf "00:00:%02d" $((dt_sec * 2)))
+
+    local casedir="${rundir}"
+    if $relative_path; then
+        casedir=$(realpath -m --relative-to=. ${rundir})
+    fi
+
+    do_restart="false"
+    do_dacyle="false"
+
+    if [[ ! -f $rundir/$domname/$domname.graph.info.part.${npefcst} ]]; then
+        split_graph "${gpmetis}" "${domname}.graph.info" "${npefcst}" "$rundir/$domname" "$dorun" "$verb"
+    fi
+
+    jobarrays=()
+    for iens in $(seq 1 $ENS_SIZE); do
+        memstr=$(printf "%02d" $iens)
+
+        local basen=$(( (iens-1)%6 ))
+        if [[ $basen -lt 2 ]]; then   local idx=0
+        elif [[ $basen -lt 4 ]]; then local idx=1
+        else                          local idx=2
+        fi
+        pblscheme=${pbl_schemes[$idx]}
+        sfcscheme=${sfclayer_schemes[$idx]}
+
+        memwrkdir=$wrkdir/fcst_$memstr
+        mkwrkdir $memwrkdir 0
+        cd $memwrkdir || return
+
+        # Link analysis file as init (read via input stream)
+        ln -sf "${datimedir}/jedi_solver/ana/mem0${memstr}.nc" \
+               "./${domname}_${memstr}.init.${currtime_fil}.nc"
+
+        # Link static files
+        ln -sf ${casedir}/${domname}/${domname}.graph.info.part.${npefcst} .
+        ln -sf ${casedir}/${domname}/${domname}.ugwp_oro_data.nc .
+        ln -sf ${casedir}/init/${domname}.invariant.nc .
+
+        # Stream lists
+        for fn in stream_list.atmosphere.da_state stream_list.atmosphere.diagnostics_da \
+                  stream_list.atmosphere.output stream_list.atmosphere.surface; do
+            cp -f ${FIXDIR}/$fn .
+        done
+
+        # Data files
+        datafiles=(  CAM_ABS_DATA.DBL  CAM_AEROPT_DATA.DBL GENPARM.TBL       LANDUSE.TBL    \
+                     OZONE_DAT.TBL     OZONE_LAT.TBL       OZONE_PLEV.TBL    RRTMG_LW_DATA  \
+                     RRTMG_LW_DATA.DBL RRTMG_SW_DATA       RRTMG_SW_DATA.DBL SOILPARM.TBL   \
+                     VEGPARM.TBL )
+        for fn in "${datafiles[@]}"; do
+            ln -sf ${FIXDIR}/$fn .
+        done
+
+        if [[ "${mpscheme}" == "mp_tempo" ]]; then
+            for fn in MP_TEMPO_HAILAWARE_QRacrQG_DATA.DBL MP_TEMPO_QRacrQS_DATA.DBL \
+                      MP_TEMPO_freezeH2O_DATA.DBL MP_TEMPO_QIautQS_DATA.DBL CCN_ACTIVATE_DATA; do
+                ln -sf ${FIXDIR}/$fn .
+            done
+        elif [[ "${mpscheme}" == "mp_thompson" ]]; then
+            for fn in MP_THOMPSON_QRacrQG_DATA.DBL MP_THOMPSON_QRacrQS_DATA.DBL \
+                      MP_THOMPSON_freezeH2O_DATA.DBL MP_THOMPSON_QIautQS_DATA.DBL CCN_ACTIVATE.BIN; do
+                ln -sf ${FIXDIR}/$fn .
+            done
+        fi
+
+        # LBC files: link from global LBC storage (hourly files).
+        # Members 19-36 share LBC from members 1-18 via (mem-1)%18+1 mapping.
+        local lbc_dir="${rundir}/lbc"
+        local src_mem=$(( (iens - 1) % 18 + 1 ))
+        local src_memstr=$(printf "%02d" $src_mem)
+        for lbc in ${lbc_dir}/${domname}_${src_memstr}.lbc.*.nc; do
+            [[ -e "${lbc}" ]] || continue
+            local lbc_bn=$(basename "${lbc}")
+            local lbc_tgt="${lbc_bn/${domname}_${src_memstr}/${domname}_${memstr}}"
+            ln -sf "${lbc}" "${lbc_tgt}"
+        done
+
+        # For non-hourly cycles, MPAS needs an LBC file at the start time.
+        # Create a symlink from the start-time filename to the previous hour's file.
+        local start_mm=${currtime_str:14:2}
+        if [[ "${start_mm}" != "00" ]]; then
+            local prev_hour_fil="${currtime_fil:0:14}00.00"
+            local start_lbc="${domname}_${memstr}.lbc.${currtime_fil}.nc"
+            local prev_lbc="${domname}_${memstr}.lbc.${prev_hour_fil}.nc"
+            [[ ! -e "${start_lbc}" && -e "${prev_lbc}" ]] && ln -sf "${prev_lbc}" "${start_lbc}"
+        fi
+
+        # Namelist: run for 2 timesteps so MPAS outputs at t+dt (not just t=0).
+        # MPAS skips the final-time output alarm when run_duration == output_interval.
+        create_namelist namelist.atmosphere
+        sed -i "s/config_run_duration.*/config_run_duration             = '${run_dur_hhmmss}'/" namelist.atmosphere
+
+        # Streams: da_state output at 1 timestep; disable restart/history.
+        # LBC input_interval must bridge from the start time to the next hourly file,
+        # i.e. (60-MM) minutes for non-hourly cycles, or 1 hour for hourly cycles.
+        local lbc_invl_min=$(( 60 - 10#${start_mm} ))
+        local lbc_invl_str=$(printf "00:%02d:00" ${lbc_invl_min})
+        cat > streams.atmosphere << STMEOF
+<streams>
+<immutable_stream name="invariant"
+                  type="input"
+                  filename_template="${domname}.invariant.nc"
+                  input_interval="initial_only" />
+
+<immutable_stream name="input"
+                  type="input"
+                  filename_template="${domname}_${memstr}.init.\$Y-\$M-\$D_\$h.\$m.\$s.nc"
+                  input_interval="initial_only" />
+
+<stream name="da_state"
+                  type="output"
+                  precision="single"
+                  clobber_mode="truncate"
+                  filename_template="${domname}_${memstr}.mpasout.\$Y-\$M-\$D_\$h.\$m.\$s.nc"
+                  io_type="pnetcdf,cdf5"
+                  output_interval="${dt_hhmmss}" >
+                  <file name="stream_list.atmosphere.da_state"/>
+</stream>
+
+<immutable_stream name="restart"
+                  type="none"
+                  filename_template="${domname}_${memstr}.restart.\$Y-\$M-\$D_\$h.\$m.\$s.nc"
+                  io_type="pnetcdf,cdf5"
+                  input_interval="none"
+                  output_interval="none" />
+
+<stream name="output"
+                  type="output"
+                  filename_template="${domname}_${memstr}.history.\$Y-\$M-\$D_\$h.\$m.\$s.nc"
+                  io_type="pnetcdf,cdf5"
+                  clobber_mode="replace_files"
+                  output_interval="none" >
+                <file name="stream_list.atmosphere.output"/>
+</stream>
+
+<stream name="diagnostics"
+                  type="output"
+                  filename_template="${domname}_${memstr}.diag.\$Y-\$M-\$D_\$h.\$m.\$s.nc"
+                  io_type="pnetcdf,cdf5"
+                  clobber_mode="replace_files"
+                  output_interval="none" >
+                <file name="stream_list.atmosphere.diagnostics_da"/>
+</stream>
+
+<stream name="surface"
+                  type="input"
+                  filename_template="${domname}_${memstr}.sfc_update.nc"
+                  filename_interval="none"
+                  input_interval="none" >
+                <file name="stream_list.atmosphere.surface"/>
+</stream>
+
+<immutable_stream name="lbc_in"
+                  type="input"
+                  filename_template="${domname}_${memstr}.lbc.\$Y-\$M-\$D_\$h.\$m.\$s.nc"
+                  filename_interval="input_interval"
+                  packages="limited_area"
+                  input_interval="${lbc_invl_str}" />
+
+<immutable_stream name="ugwp_oro_data_in"
+                  type="input"
+                  filename_template="${domname}.ugwp_oro_data.nc"
+                  input_interval="initial_only" />
+</streams>
+STMEOF
+
+        jobarrays+=("$iens")
+    done
+
+    cd $wrkdir || return
+
+    declare -A jobParms=(
+        [PARTION]="${partition_fcst}"
+        [NOPART]="$npefcst"
+        [NNODES]="${nnodes_fcst}"
+        [JOBNAME]="rediag-${jobname}_${eventtime}"
+        [CPUSPEC]="${claim_cpu_fcst} --mem-per-cpu=4G"
+        [MPASDIR]="${MPAS_DIR}"
+        [MODULE]="${mpas_modulename}"
+    )
+
+    if [[ "${mach}" == "pbs" ]]; then
+        jobParms[NNODES]="${nnodes_fcst}"
+        jobParms[NCORES]="${ncores_fcst}"
+    fi
+
+    local jobarraystr
+    jobarraystr=$(get_jobarray_str ${mach} "${jobarrays[@]}")
+
+    submit_a_job "$wrkdir" "rediag" "jobParms" "$TEMPDIR/run_rediag_array.${mach}" "run_rediag.${mach}" "${jobarraystr}"
+}
+
+########################################################################
+
+function run_jedi_post_rediag {
+    # Post observer using analysis with MPAS-rediagnosed refl10cm.
+    # $1        $2      $3
+    # wrkdir    icycle    iseconds
+    local datimedir=$1
+    local icycle=$2
+    local iseconds=$3
+    local datimedir_abs=$1
+
+    local wrkdir="$datimedir/jedi_post_rediag"
+
+    if [[ -f $wrkdir/running.post || -f $wrkdir/done.post || -f $wrkdir/queue.jedi_post_rediag ]]; then
+        return
+    fi
+
+    mkwrkdir $wrkdir 0
+    cd $wrkdir || return
+
+    if ${relative_path}; then
+        datimedir=$(realpath -m --relative-to=. ${datimedir_abs})
+    fi
+
+    # Wait for rediag_mpas to finish
+    local -a conditions
+    conditions=("${datimedir}/rediag_mpas/done.rediag")
+
+    if [[ $dorun == true ]]; then
+        for cond in "${conditions[@]}"; do
+            mecho0 "Checking $cond...."
+            while [[ ! -e $cond ]]; do
+                [[ $verb -eq 1 ]] && mecho0 "Waiting for file: $cond"
+                sleep 10
+            done
+        done
+    fi
+
+    # ------------------------------------------------------------------
+    # Create ana_rediag: copy analysis files, replace refl10cm from
+    # 1-step MPAS output using the full microphysics diagnostic.
+    # Use absolute paths for file operations (cp, ncks).
+    # ------------------------------------------------------------------
+    local ana_rediag="${datimedir_abs}/jedi_solver/ana_rediag"
+    if [[ ! -d "${ana_rediag}" ]]; then
+        mkwrkdir "${ana_rediag}" 0
+
+        local currtime_fil=${currtime_str//:/.}
+        local dt_sec=${time_step}
+        local rediag_sec=$((iseconds + dt_sec))
+        local rediag_fil=$(date -u -d @${rediag_sec} +%Y-%m-%d_%H.%M.%S)
+
+        mecho0 "Creating ana_rediag: replacing refl10cm from 1-step MPAS output ..."
+
+        # Copy mem000 as is
+        [[ -f "${datimedir_abs}/jedi_solver/ana/mem000.nc" ]] && \
+            cp "${datimedir_abs}/jedi_solver/ana/mem000.nc" "${ana_rediag}/mem000.nc"
+
+        local replace_script="${rootdir}/scripts/replace_refl10cm.py"
+        for iens in $(seq 1 $ENS_SIZE); do
+            memstr=$(printf "%02d" $iens)
+            local src="${datimedir_abs}/jedi_solver/ana/mem0${memstr}.nc"
+            local dst="${ana_rediag}/mem0${memstr}.nc"
+            local mpasout="${datimedir_abs}/rediag_mpas/fcst_${memstr}/${domname}_${memstr}.mpasout.${rediag_fil}.nc"
+
+            cp "${src}" "${dst}"
+
+            if [[ -f "${mpasout}" ]]; then
+                python3 "${replace_script}" "${mpasout}" "${dst}" || \
+                    mecho0 "${RED}WARNING${NC}: refl10cm replacement failed for mem0${memstr}"
+            else
+                mecho0 "${RED}WARNING${NC}: rediag output not found: ${mpasout}"
+            fi
+        done
+        mecho0 "ana_rediag created."
+    fi
+
+    # ------------------------------------------------------------------
+    # Prepare post runtime files (reuse jedi_preparation for "post")
+    # ------------------------------------------------------------------
+    taskname="post"
+    jedi_preparation "${taskname}" "${wrkdir}" $2 $3
+
+    cd "${wrkdir}" || exit 1
+
+    # Point ana to ana_rediag instead of original ana
+    rm -f ana
+    ln -snfr "${datimedir}/jedi_solver/ana_rediag" ana
+
+    # Link observer jdiag as input
+    ln -snfr "${datimedir}"/jedi_observer/jdiag* jdiag/
+
+    # Fix jdiag glob in the generated SLURM script to avoid matching jdiag directory
+    jobscript="run_mpasjedi_post_rediag.${mach}"
+
+    declare -A jobParms=(
+        [PARTION]="${partition_filter}"
+        [NOPART]="${npefilter}"
+        [NNODES]="${nnodes_filter}"
+        [JOBNAME]="postr-${jobname}_${eventtime}"
+        [CPUSPEC]="${claim_cpu_filter}"
+        [EXEDIR]="${EXEDIR}/jedi"
+        [WRKDIR]="${wrkdir}"
+        [TASKNAME]="${taskname}"
+        [JEDIDIR]="${JEDI_DIR}"
+        [MODULE]="${jedi_modulename}"
+    )
+
+    if [[ "${mach}" == "pbs" ]]; then
+        jobParms[NNODES]="${nnodes_filter}"
+        jobParms[NCORES]="${ncores_filter}"
+    fi
+
+    submit_a_job "${wrkdir}" "jedi_post_rediag" "jobParms" "$TEMPDIR/run_mpasjedi.${mach}" "$jobscript" ""
+}
+
+########################################################################
+
 function run_add_noise {
     # $1        $2
     # wrkdir    iseconds
@@ -1904,10 +2253,10 @@ function run_mpas {
             mpas_inputfile_template="${domname}_${memstr}.init.nc"
             initfile="./${domname}_${memstr}.mpasout.${currtime_fil}.nc"
         else
-            do_restart="true"
+            do_restart="false"
             do_dacyle="true"
             mpas_inputfile_template="${domname}_${memstr}.init.nc"
-            initfile="./${domname}_${memstr}.restart.${currtime_fil}.nc"
+            initfile="./${domname}_${memstr}.mpasout.${currtime_fil}.nc"
         fi
 
         local casedir="${rundir}"
@@ -2184,6 +2533,30 @@ function dacycle_driver() {
         if [[ " ${jobs[*]} " =~ " jedi_post " ]]; then
             if [[ $verb -eq 1 ]]; then echo "  Run jedi_post at $eventtime"; fi
             run_jedi_post $dawrkdir $icyc $isec
+        fi
+
+        #------------------------------------------------------
+        # 4b. Run rediag + post_rediag (recompute refl10cm from
+        #     analysis hydrometeors via 1-step MPAS forecast,
+        #     then re-run post observer for correct H(xa)).
+        #     Auto-enabled when reflectivity is assimilated.
+        #------------------------------------------------------
+        if [[ " ${jobs[*]} " =~ " jedi_post " && "${DO_RADAR_REF}" == "true" ]]; then
+            if [[ $verb -eq 1 ]]; then echo "  Run rediag_fcst at $eventtime"; fi
+            run_rediag_fcst $dawrkdir $icyc $isec
+
+            if [[ ! -e $dawrkdir/rediag_mpas/done.rediag ]]; then
+                check_job_status "rediag fcst_" "$dawrkdir/rediag_mpas" $ENS_SIZE "run_rediag.${mach}" ${num_resubmit}
+            fi
+
+            if [[ $verb -eq 1 ]]; then echo "  Run jedi_post_rediag at $eventtime"; fi
+            run_jedi_post_rediag $dawrkdir $icyc $isec
+
+            if [[ -d $dawrkdir/rediag_mpas ]]; then
+                find $dawrkdir/rediag_mpas/ -name "*.nc" -delete 2>/dev/null
+                find $dawrkdir/rediag_mpas/ -type l -delete 2>/dev/null
+                mecho0 "Cleaned rediag_mpas forecast files for ${eventtime}"
+            fi
         fi
 
         #------------------------------------------------------

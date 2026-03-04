@@ -188,7 +188,7 @@ function submit_a_job {
     if [[ $dorun == true ]]; then mecho1n "Submitting ${BROWN}${myjobscript}${NC} .... "; fi
     # shellcheck disable=SC2154
     "${commandlist[@]}"
-    if [[ $dorun == true && $? -eq 0 ]]; then touch ${mywrkdir}/queue.${myjobname}; fi
+    if [[ $dorun == true && $? -eq 0 ]]; then touch ${mywrkdir}/queue.${myjobname}; sync; fi
     echo " "
 }
 
@@ -309,6 +309,15 @@ function check_job_status {
                         (( abort+=1 ))
                         #rm ${lastestfile}                               # to avoid it will be used for next try again
                         mv ${lastestfile} ${lastestfile}_try${numtry}    # to avoid it will be used for next try again
+                        rm -f "$memdir/running.${jobname}_$memstr"
+                        break
+                    elif grep -qEi "DUE TO TIME LIMIT|Out Of Memory|oom_kill|CANCELLED" ${lastestfile}; then
+                        # abort: SLURM killed/cancelled the job (timeout/OOM/deadlock/scancel), resubmission may help
+                        mecho1 "Member ${mem} killed/cancelled by SLURM, will retry"
+                        abortjobarray+=("$mem")
+                        (( abort+=1 ))
+                        mv ${lastestfile} ${lastestfile}_try${numtry}
+                        rm -f "$memdir/running.${jobname}_$memstr" "$memerrorfile"
                         break
                     elif [[ -e $memerrorfile ]]; then   # error: program error, resubmission may not help
                         errorjobarray+=("$mem")
@@ -1337,4 +1346,62 @@ function expand_range {
 ##for num in "${number_array[@]}"; do
 ##    echo "$num"
 ##done
+########################################################################
+
+parallel_copy_verify() {
+    if [ "$#" -lt 2 ]; then
+        echo "Usage: parallel_copy_verify <dest_dir> <file1> <file2> ..."
+        return 1
+    fi
+
+    local DEST="$1"
+    shift
+    local FILES=("$@")
+
+    local VERBOSE=true
+    local THREADS=${#FILES[@]}
+
+    log_msg() { [[ "$VERBOSE" == true ]] && mecho1 "$1"; }
+
+    log_msg "--- Phase 1: Parallel Copy (Threads: $THREADS) ---"
+    printf "%s\n" "${FILES[@]}" | parallel -j "$THREADS" cp -L {} "$DEST"
+
+    log_msg "--- Phase 2: Verifying file sizes ---"
+
+    local FAILED_FILES=()
+    for src in "${FILES[@]}"; do
+        local bn dst
+        bn=$(basename "$src")
+        dst="${DEST}/${bn}"
+        local src_sz dst_sz
+        src_sz=$(stat -Lc%s "$src" 2>/dev/null || echo 0)
+        dst_sz=$(stat -Lc%s "$dst" 2>/dev/null || echo -1)
+        if [[ "$src_sz" != "$dst_sz" ]]; then
+            FAILED_FILES+=("$src")
+        fi
+    done
+
+    if [ ${#FAILED_FILES[@]} -eq 0 ]; then
+        log_msg "All ${#FILES[@]} files copied and verified (size match)."
+    else
+        log_msg "Size mismatch for ${#FAILED_FILES[@]} files. Retrying ..."
+        printf "%s\n" "${FAILED_FILES[@]}" | parallel -j "${#FAILED_FILES[@]}" cp -L {} "$DEST"
+
+        local STILL_FAILED=0
+        for src in "${FAILED_FILES[@]}"; do
+            local bn dst src_sz dst_sz
+            bn=$(basename "$src"); dst="${DEST}/${bn}"
+            src_sz=$(stat -Lc%s "$src" 2>/dev/null || echo 0)
+            dst_sz=$(stat -Lc%s "$dst" 2>/dev/null || echo -1)
+            if [[ "$src_sz" != "$dst_sz" ]]; then
+                mecho0 "CRITICAL: copy still failed: $src ($src_sz) -> $dst ($dst_sz)"
+                (( STILL_FAILED++ ))
+            fi
+        done
+        if [[ $STILL_FAILED -eq 0 ]]; then
+            log_msg "All files verified after retry."
+        fi
+    fi
+}
+
 ########################################################################
