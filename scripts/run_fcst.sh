@@ -1417,7 +1417,7 @@ function fcst_driver() {
                 for ((i=diag_start;i<=fcst_seconds;i+=OUTINVL)); do
                     minstr=$(printf "%03d" $((i/60)))
                     #jobname=$1 mywrkdir=$2 donenum=$3 myjobscript=$4 numtries=${5-3}
-                    check_job_status "upp$minstr mem" $fcstwrkdir/upp $ENS_SIZE run_upp_$minstr.slurm ${num_resubmit}
+                    check_job_status "upp$minstr mem" $fcstwrkdir/upp $ENS_SIZE run_upp$minstr.slurm ${num_resubmit}
                 done
             fi
         fi
