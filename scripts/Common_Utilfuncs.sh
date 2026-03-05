@@ -324,6 +324,26 @@ function check_job_status {
                         (( error+=1 ))
                         break
                     fi
+
+                    # Hang/stall detection: if log file unchanged for HANG_TIMEOUT_SEC,
+                    # the job is likely stuck (MPI deadlock, InfiniBand fault, etc.).
+                    # Cancel the SLURM job and mark for resubmission.
+                    if [[ ${HANG_TIMEOUT_SEC:-0} -gt 0 ]]; then
+                        _hang_age=$(( $(date +%s) - $(stat -c %Y -- "${lastestfile}") ))
+                        if [[ $_hang_age -gt ${HANG_TIMEOUT_SEC} ]]; then
+                            _stuck_jobid=$(basename "${lastestfile}" .log | rev | cut -d'_' -f1 | rev)
+                            mecho1 "Member ${mem} appears ${RED}HUNG${NC} (log unchanged for ${_hang_age}s > ${HANG_TIMEOUT_SEC}s), cancelling job ${_stuck_jobid}"
+                            if [[ -n "${_stuck_jobid}" && "${_stuck_jobid}" =~ ^[0-9]+$ ]]; then
+                                scancel "${_stuck_jobid}" 2>/dev/null
+                                sleep 5
+                            fi
+                            abortjobarray+=("$mem")
+                            (( abort+=1 ))
+                            mv "${lastestfile}" "${lastestfile}_try${numtry}"
+                            rm -f "$memdir/running.${jobname}_$memstr"
+                            break
+                        fi
+                    fi
                 fi
 
                 if $checkonly; then
