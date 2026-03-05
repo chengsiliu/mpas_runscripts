@@ -9,23 +9,25 @@
 
 REAL_NCKS=/scratch3/NAGAPE/wof/ywang/conda/wofs_post/bin/ncks
 NCKS_TIMEOUT=300   # 5 minutes per attempt
+KILL_AFTER=30      # SIGKILL 30s after SIGTERM if process ignores it
 MAX_ATTEMPTS=3
 
 for attempt in $(seq 1 $MAX_ATTEMPTS); do
-    /usr/bin/timeout "$NCKS_TIMEOUT" "$REAL_NCKS" "$@"
+    /usr/bin/timeout --kill-after="$KILL_AFTER" "$NCKS_TIMEOUT" "$REAL_NCKS" "$@"
     rc=$?
 
     if [[ $rc -eq 0 ]]; then
         exit 0
     fi
 
-    if [[ $rc -eq 124 ]]; then
-        # timeout sends SIGTERM (rc=124)
-        echo "ncks-wrapper: attempt $attempt/$MAX_ATTEMPTS timed out after ${NCKS_TIMEOUT}s" >&2
+    # rc=124: timeout killed via SIGTERM
+    # rc=137: killed by SIGKILL (--kill-after or OOM)
+    # Both are retriable — clean up .tmp and try again
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "ncks-wrapper: attempt $attempt/$MAX_ATTEMPTS failed (exit $rc, timeout=${NCKS_TIMEOUT}s)" >&2
 
-        # Clean up any .tmp file left by the timed-out ncks.
-        # ncks in-place creates <file>.pid<PID>.ncks.tmp — find and remove them
-        # based on the last positional argument (the output file).
+        # Clean up any .tmp file left by the killed ncks.
+        # ncks in-place creates <file>.pid<PID>.ncks.tmp
         outfile="${@: -1}"
         if [[ -n "$outfile" && -f "$outfile" ]]; then
             for tmpf in "${outfile}".pid*.ncks.tmp; do
@@ -34,11 +36,11 @@ for attempt in $(seq 1 $MAX_ATTEMPTS); do
         fi
 
         if [[ $attempt -lt $MAX_ATTEMPTS ]]; then
-            sleep 2
+            sleep 5
             echo "ncks-wrapper: retrying ..." >&2
         fi
     else
-        echo "ncks-wrapper: ncks exited with code $rc on attempt $attempt" >&2
+        echo "ncks-wrapper: ncks exited with code $rc on attempt $attempt (not retriable)" >&2
         exit $rc
     fi
 done
