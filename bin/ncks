@@ -1,0 +1,47 @@
+#!/bin/bash
+#
+# ncks wrapper with timeout and retry.
+# Addresses known ncks hang issue on Ursa's parallel filesystem
+# when doing in-place compression (ncks --ovr -4 --ppc ...).
+#
+# Placed ahead of conda's ncks in PATH via env.python.
+#
+
+REAL_NCKS=/scratch3/NAGAPE/wof/ywang/conda/wofs_post/bin/ncks
+NCKS_TIMEOUT=300   # 5 minutes per attempt
+MAX_ATTEMPTS=3
+
+for attempt in $(seq 1 $MAX_ATTEMPTS); do
+    /usr/bin/timeout "$NCKS_TIMEOUT" "$REAL_NCKS" "$@"
+    rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        exit 0
+    fi
+
+    if [[ $rc -eq 124 ]]; then
+        # timeout sends SIGTERM (rc=124)
+        echo "ncks-wrapper: attempt $attempt/$MAX_ATTEMPTS timed out after ${NCKS_TIMEOUT}s" >&2
+
+        # Clean up any .tmp file left by the timed-out ncks.
+        # ncks in-place creates <file>.pid<PID>.ncks.tmp — find and remove them
+        # based on the last positional argument (the output file).
+        outfile="${@: -1}"
+        if [[ -n "$outfile" && -f "$outfile" ]]; then
+            for tmpf in "${outfile}".pid*.ncks.tmp; do
+                [[ -f "$tmpf" ]] && rm -f "$tmpf" && echo "ncks-wrapper: cleaned $tmpf" >&2
+            done
+        fi
+
+        if [[ $attempt -lt $MAX_ATTEMPTS ]]; then
+            sleep 2
+            echo "ncks-wrapper: retrying ..." >&2
+        fi
+    else
+        echo "ncks-wrapper: ncks exited with code $rc on attempt $attempt" >&2
+        exit $rc
+    fi
+done
+
+echo "ncks-wrapper: FAILED after $MAX_ATTEMPTS attempts" >&2
+exit 1
