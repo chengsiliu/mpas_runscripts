@@ -232,7 +232,7 @@ if [[ -f ${config_file} ]]; then
     fcstoutinvl="${OUTINVL}"
     level_file="${vertLevel_file}"
     # shellcheck disable=SC2154
-    wof_domain_name="geo_${domain_name##*_}"
+    wof_domain_name="geo_${domname##*_}"
 else
     echo " "
     echo -e "${RED}ERROR${NC}: Config file ${CYAN}${config_file}${NC} not exist."
