@@ -61,6 +61,7 @@ function setup_machine {
 
         workdirDF="/scratch3/NAGAPE/wof/cliu/MPAS-WoFS/run_dirs"
         post_dir="/scratch3/NAGAPE/wof/ywang/MPAS-WoFS/frdd-wofs-post"
+        RT_OBSDIR="/scratch3/NAGAPE/wof/ywang/rt_obs"
 
         if [[ ${set_up} == true ]]; then
             source /etc/profile.d/modules.sh
@@ -223,6 +224,7 @@ function setup_machine {
         modulename="env.mpas_smiol"
         workdirDF="/scratch/wofs_mpas/run_dirs"
         post_dir="/scratch/home/yunheng.wang/MPAS/frdd-wofs-post"
+        RT_OBSDIR="/work/rt_obs"
         ;;
     * )
         # Vecna at NSSL
@@ -233,6 +235,7 @@ function setup_machine {
         fi
         workdirDF="/scratch/wofs_mpas/run_dirs"
         post_dir="/home/yunheng.wang/MPAS/frdd-wofs-post"
+        RT_OBSDIR="/work/rt_obs"
 
         if [[ ${initialize} == true ]]; then
             ncores_static=96
@@ -269,6 +272,7 @@ function setup_machine {
     if [[ ${use_python} == true ]]; then
         source "${root_dir}/modules/env.python"  || exit $?
         echo -e "Activated Python environment ${YELLOW}${python_env}${NC} on ${LIGHT_RED}${machine}${NC} ..."
+        export RT_OBSDIR
     fi
 
     export machine runcmd workdirDF post_dir
