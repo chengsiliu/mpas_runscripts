@@ -700,7 +700,7 @@ function create_streams {
                   filename_template="${domname}_${memstr}.restart.\$Y-\$M-\$D_\$h.\$m.\$s.nc"
                   io_type="${OUTIOTYPE}"
                   input_interval="initial_only"
-                  clobber_mode="replace_files" >
+                  clobber_mode="replace_files"
                   output_interval="${RSTINVL_STR}" />
 
 <stream name="output"
